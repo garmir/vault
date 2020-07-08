@@ -14,6 +14,7 @@ import (
 	uuid "github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/vault/command/agentproxyshared/sink"
 	"github.com/hashicorp/vault/sdk/helper/logging"
+	"github.com/stretchr/testify/require"
 )
 
 func testFileSink(t *testing.T, log hclog.Logger) (*sink.SinkConfig, string) {
@@ -254,4 +255,52 @@ func openDescriptorCount(t *testing.T) int {
 		t.Fatal(err)
 	}
 	return len(entries)
+}
+
+// TestFileSinkMode_Parsing checks how the mode option is read: a number is
+// taken as is and must be an octal literal in hcl, a string of octal digits
+// is accepted for json configs, and a number with bits above the
+// permission bits is rejected since it is almost always a decimal value
+// written where an octal one was meant.
+func TestFileSinkMode_Parsing(t *testing.T) {
+	log := logging.NewVaultLogger(hclog.Trace)
+
+	tests := []struct {
+		name     string
+		mode     interface{}
+		wantMode os.FileMode
+		wantErr  string
+	}{
+		{name: "octal literal", mode: 0o640, wantMode: 0o640},
+		{name: "string with leading zero", mode: "0640", wantMode: 0o640},
+		{name: "string without leading zero", mode: "640", wantMode: 0o640},
+		{name: "decimal with bits above 0777", mode: 640, wantErr: "octal"},
+		{name: "string that is not octal", mode: "0689", wantErr: "octal"},
+		{name: "unsupported type", mode: 6.4, wantErr: "'mode'"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "token")
+			config := &sink.SinkConfig{
+				Logger: log.Named("sink.file"),
+				Config: map[string]interface{}{
+					"path": path,
+					"mode": tc.mode,
+				},
+			}
+
+			s, err := NewFileSink(config)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+
+			require.NoError(t, s.WriteToken("token"))
+			fi, err := os.Stat(path)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantMode, fi.Mode().Perm())
+		})
+	}
 }
