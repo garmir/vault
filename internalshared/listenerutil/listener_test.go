@@ -8,6 +8,7 @@ import (
 	"os"
 	osuser "os/user"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -87,4 +88,24 @@ func TestUnixSocketListener(t *testing.T) {
 			t.Fatalf("failed to set permissions on the socket file")
 		}
 	})
+}
+
+// TestUnixSocketListener_UnknownGroup checks that a group that cannot be
+// resolved fails the listener with an error that names the group.
+func TestUnixSocketListener_UnknownGroup(t *testing.T) {
+	socket, err := ioutil.TempFile("", "socket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socket.Name())
+
+	_, err = UnixSocketListener(socket.Name(), &UnixSocketsConfig{
+		Group: "no-such-group-for-vault-tests",
+	})
+	if err == nil {
+		t.Fatal("expected an error for an unknown group")
+	}
+	if !strings.Contains(err.Error(), `group "no-such-group-for-vault-tests"`) {
+		t.Fatalf("error does not name the group: %v", err)
+	}
 }

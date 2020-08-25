@@ -20,8 +20,8 @@ func unixListenerFactory(l *configutil.Listener, _ io.Writer, ui cli.Ui) (net.Li
 	}
 
 	var cfg *listenerutil.UnixSocketsConfig
-	if l.SocketMode != "" &&
-		l.SocketUser != "" &&
+	if l.SocketMode != "" ||
+		l.SocketUser != "" ||
 		l.SocketGroup != "" {
 		cfg = &listenerutil.UnixSocketsConfig{
 			Mode:  l.SocketMode,
