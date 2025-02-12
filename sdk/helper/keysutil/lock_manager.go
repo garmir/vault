@@ -151,6 +151,16 @@ func (lm *LockManager) InitCache(cacheSize int) error {
 	return nil
 }
 
+// KeyExistsError is returned by RestorePolicy when a key with the requested
+// name already exists and the restore was not forced.
+type KeyExistsError struct {
+	Name string
+}
+
+func (e *KeyExistsError) Error() string {
+	return fmt.Sprintf("key %q already exists", e.Name)
+}
+
 // RestorePolicy acquires an exclusive lock on the policy name and restores the
 // given policy along with the archive.
 func (lm *LockManager) RestorePolicy(ctx context.Context, storage logical.Storage, name, backup string, force bool) (string, error) {
@@ -191,7 +201,7 @@ func (lm *LockManager) RestorePolicy(ctx context.Context, storage logical.Storag
 	if lm.useCache {
 		pRaw, ok = lm.cache.Load(name)
 		if ok && !force {
-			return "", fmt.Errorf("key %q already exists", name)
+			return "", &KeyExistsError{Name: name}
 		}
 	}
 
@@ -213,7 +223,7 @@ func (lm *LockManager) RestorePolicy(ctx context.Context, storage logical.Storag
 			return "", err
 		}
 		if p != nil && !force {
-			return "", fmt.Errorf("key %q already exists", name)
+			return "", &KeyExistsError{Name: name}
 		}
 	}
 

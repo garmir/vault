@@ -105,12 +105,10 @@ func testBackupRestore(t *testing.T, keyType, feature string) {
 		},
 	}
 	resp, err = b.HandleRequest(context.Background(), restoreReq)
-	if resp != nil && resp.IsError() {
-		t.Fatalf("resp: %#v\nerr: %v", resp, err)
-	}
-	if err == nil {
-		t.Fatalf("expected an error")
-	}
+	require.ErrorIs(t, err, logical.ErrInvalidRequest)
+	require.NotNil(t, resp)
+	require.True(t, resp.IsError(), "expected an error response, got %#v", resp)
+	require.ErrorContains(t, resp.Error(), "already exists")
 
 	plaintextB64 := "dGhlIHF1aWNrIGJyb3duIGZveA==" // "the quick brown fox"
 

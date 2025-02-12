@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"testing"
 
 	"github.com/hashicorp/vault/sdk/logical"
@@ -113,4 +114,46 @@ func TestRestorePolicy_NilPolicy(t *testing.T) {
 	_, err = lm.RestorePolicy(ctx, storage, "test-key", invalidBackup, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "backup data does not contain a valid policy")
+}
+
+// TestRestorePolicy_KeyExists checks that restoring a backup over a key that
+// already exists fails with a typed error, with and without the cache, and
+// that force still allows it.
+func TestRestorePolicy_KeyExists(t *testing.T) {
+	testKeys, err := generateTestKeys()
+	require.NoError(t, err)
+
+	for _, useCache := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cache=%t", useCache), func(t *testing.T) {
+			lm, err := NewLockManager(useCache, 0)
+			require.NoError(t, err)
+
+			ctx := context.Background()
+			storage := &logical.InmemStorage{}
+
+			err = lm.ImportPolicy(ctx, PolicyRequest{
+				Name:                 "test-key",
+				KeyType:              KeyType_AES256_GCM96,
+				Storage:              storage,
+				IsPrivateKey:         true,
+				Exportable:           true,
+				AllowPlaintextBackup: true,
+			}, testKeys[KeyType_AES256_GCM96], rand.Reader)
+			require.NoError(t, err)
+
+			backup, err := lm.BackupPolicy(ctx, storage, "test-key")
+			require.NoError(t, err)
+
+			_, err = lm.RestorePolicy(ctx, storage, "", backup, false)
+			require.EqualError(t, err, `key "test-key" already exists`)
+
+			// callers need a typed error to report the conflict as a client error
+			var keyExists *KeyExistsError
+			require.ErrorAs(t, err, &keyExists)
+			require.Equal(t, "test-key", keyExists.Name)
+
+			_, err = lm.RestorePolicy(ctx, storage, "", backup, true)
+			require.NoError(t, err, "force must still allow the restore")
+		})
+	}
 }

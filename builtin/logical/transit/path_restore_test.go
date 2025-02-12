@@ -207,17 +207,29 @@ func TestTransit_Restore(t *testing.T) {
 			}
 
 			resp, err = b.HandleRequest(context.Background(), restoreReq)
-			if resp != nil && resp.IsError() {
-				t.Fatalf("resp: %#v\nerr: %v", resp, err)
-			}
-			if err == nil && tc.ExpectedErr != nil {
-				t.Fatalf("expected an error, but got none")
-			}
-			if err != nil && tc.ExpectedErr == nil {
-				t.Fatalf("unexpected error:%s", err)
-			}
-
-			if err != nil && tc.ExpectedErr != nil {
+			switch {
+			case tc.ExpectedErr == nil:
+				if err != nil {
+					t.Fatalf("unexpected error:%s", err)
+				}
+				if resp != nil && resp.IsError() {
+					t.Fatalf("resp: %#v\nerr: %v", resp, err)
+				}
+			case tc.ExpectedErr == keyExitsError:
+				// an existing key is a client mistake, so it has to come back as
+				// an error response with a 400 status rather than a bare error
+				// that the http layer turns into a 500 and clients retry
+				require.ErrorIs(t, err, logical.ErrInvalidRequest)
+				require.NotNil(t, resp)
+				require.True(t, resp.IsError(), "expected an error response, got %#v", resp)
+				require.EqualError(t, resp.Error(), tc.ExpectedErr.Error())
+			default:
+				if resp != nil && resp.IsError() {
+					t.Fatalf("resp: %#v\nerr: %v", resp, err)
+				}
+				if err == nil {
+					t.Fatalf("expected an error, but got none")
+				}
 				if err.Error() != tc.ExpectedErr.Error() {
 					t.Fatalf("expected error: (%s), got: (%s)", tc.ExpectedErr.Error(), err.Error())
 				}
