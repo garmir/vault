@@ -8495,3 +8495,42 @@ func TestBackend_MetricsWrapManagesNilResp(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, resp)
 }
+
+// TestIssuance_ExpiredIssuerTruncate checks that an issuer with
+// leaf_not_after_behavior=truncate refuses to issue once it has expired,
+// instead of handing out a certificate whose notAfter is already in the past.
+func TestIssuance_ExpiredIssuerTruncate(t *testing.T) {
+	t.Parallel()
+	b, s := CreateBackendWithStorage(t)
+
+	rootResp, err := CBWrite(b, s, "root/generate/internal", map[string]interface{}{
+		"common_name": "root myvault.com",
+		"key_type":    "ec",
+		"ttl":         "2s",
+		"issuer_name": "root-ca",
+	})
+	requireSuccessNonNilResponse(t, rootResp, err, "expected root generation to succeed")
+
+	resp, err := CBPatch(b, s, "issuer/root-ca", map[string]interface{}{
+		"leaf_not_after_behavior": "truncate",
+	})
+	requireSuccessNonNilResponse(t, resp, err, "expected issuer update to succeed")
+
+	resp, err = CBWrite(b, s, "roles/test-role", map[string]interface{}{
+		"allow_any_name": true,
+		"key_type":       "ec",
+		"max_ttl":        "1h",
+	})
+	requireSuccessNonNilResponse(t, resp, err, "expected role creation to succeed")
+
+	// wait for the issuer to expire. the role's default not_before_duration
+	// of 30s is what used to let a notAfter a few seconds in the past through.
+	rootCert := parseCert(t, rootResp.Data["certificate"].(string))
+	time.Sleep(time.Until(rootCert.NotAfter) + time.Second)
+
+	resp, err = CBWrite(b, s, "issuer/root-ca/issue/test-role", map[string]interface{}{
+		"common_name": "leaf.example.com",
+	})
+	require.Error(t, err, "expected an error instead of an expired certificate, got: %v", resp)
+	require.ErrorContains(t, err, "in the past")
+}

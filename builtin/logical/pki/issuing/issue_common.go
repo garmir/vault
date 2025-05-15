@@ -1063,6 +1063,16 @@ func GetCertificateNotAfter(b logical.SystemView, role *RoleEntry, input CertNot
 		return time.Time{}, warnings, errutil.UserError{Err: "notAfter before notBefore"}
 	}
 
+	// the resulting notAfter has to be in the future. an issuer with
+	// leaf_not_after_behavior=truncate that has itself expired
+	// would otherwise hand out a certificate that is already expired, as long
+	// as its notAfter is still within the role's not_before_duration, and an
+	// explicit not_after inside that window is rejected the same way
+	if notAfter.Before(time.Now()) {
+		return time.Time{}, warnings, errutil.UserError{Err: fmt.Sprintf(
+			"cannot satisfy request, as the resulting notAfter of %s is in the past", notAfter.UTC().Format(time.RFC3339Nano))}
+	}
+
 	if caSign != nil && notBefore.Before(caSign.Certificate.NotBefore) {
 		return time.Time{}, warnings, errutil.UserError{Err: "notBefore before signer's notBefore"}
 	}
