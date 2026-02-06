@@ -206,8 +206,11 @@ func NewRaftLayer(logger log.Logger, raftTLSKeyring *TLSKeyring, clusterListener
 }
 
 func (l *raftLayer) setTLSKeyring(keyring *TLSKeyring) error {
-	// Fast path a noop update
-	if l.keyring != nil && l.keyring.Term == keyring.Term {
+	// fast path a noop update. the term alone does not identify a keyring:
+	// two clusters that were initialised separately both start at term 0, and
+	// after a snapshot restore from one into the other the keys in storage
+	// change while the term does not
+	if l.keyring != nil && l.keyring.Term == keyring.Term && sameKeyIDs(l.keyring, keyring) {
 		return nil
 	}
 
@@ -249,6 +252,20 @@ func (l *raftLayer) setTLSKeyring(keyring *TLSKeyring) error {
 	l.keyring = keyring
 
 	return nil
+}
+
+// sameKeyIDs reports whether two keyrings hold the same keys in the same
+// order and agree on the active key.
+func sameKeyIDs(a, b *TLSKeyring) bool {
+	if a.ActiveKeyID != b.ActiveKeyID || len(a.Keys) != len(b.Keys) {
+		return false
+	}
+	for i := range a.Keys {
+		if a.Keys[i].ID != b.Keys[i].ID {
+			return false
+		}
+	}
+	return true
 }
 
 func (l *raftLayer) ServerName() string {

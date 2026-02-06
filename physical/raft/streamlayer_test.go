@@ -71,3 +71,77 @@ func TestStreamLayer_UnspecifiedIP(t *testing.T) {
 		t.Fatal("nil layer")
 	}
 }
+
+// TestStreamLayer_SetTLSKeyringSameTerm checks that a keyring with the same
+// term but different keys replaces the current one. two clusters that were
+// initialised separately both start at term 0, so after a snapshot restore
+// from one into the other the keys change while the term does not.
+func TestStreamLayer_SetTLSKeyringSameTerm(t *testing.T) {
+	m := &mockClusterHook{
+		address: &cluster.NetAddr{
+			Host: "10.0.0.1:8200",
+		},
+	}
+
+	keyA, err := GenerateTLSKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := GenerateTLSKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	layer, err := NewRaftLayer(nil, &TLSKeyring{
+		Keys:        []*TLSKey{keyA},
+		ActiveKeyID: keyA.ID,
+	}, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restored := &TLSKeyring{
+		Keys:        []*TLSKey{keyB},
+		ActiveKeyID: keyB.ID,
+	}
+	if err := layer.setTLSKeyring(restored); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := layer.ServerName(); got != keyB.ID {
+		t.Fatalf("server name: expected %q, got %q", keyB.ID, got)
+	}
+
+	cert, err := layer.ServerLookup(context.Background(), &tls.ClientHelloInfo{ServerName: keyB.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cert == nil {
+		t.Fatal("expected the restored key to be served for its own server name")
+	}
+
+	// an equal keyring in a different object is still a no-op
+	same := &TLSKeyring{Keys: restored.Keys, ActiveKeyID: restored.ActiveKeyID}
+	if err := layer.setTLSKeyring(same); err != nil {
+		t.Fatal(err)
+	}
+	if layer.keyring != restored {
+		t.Fatal("expected an equal keyring to be a no-op")
+	}
+
+	// the same keys with a different active key are not
+	twoKeys := &TLSKeyring{Keys: []*TLSKey{keyA, keyB}, ActiveKeyID: keyA.ID}
+	if err := layer.setTLSKeyring(twoKeys); err != nil {
+		t.Fatal(err)
+	}
+	if got := layer.ServerName(); got != keyA.ID {
+		t.Fatalf("server name: expected %q, got %q", keyA.ID, got)
+	}
+	switched := &TLSKeyring{Keys: []*TLSKey{keyA, keyB}, ActiveKeyID: keyB.ID}
+	if err := layer.setTLSKeyring(switched); err != nil {
+		t.Fatal(err)
+	}
+	if got := layer.ServerName(); got != keyB.ID {
+		t.Fatalf("active key change was ignored: expected %q, got %q", keyB.ID, got)
+	}
+}
