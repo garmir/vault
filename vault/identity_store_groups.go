@@ -580,6 +580,20 @@ func (i *IdentityStore) handleGroupDeleteCommon(ctx context.Context, key string,
 		}
 	}
 
+	// remove this group from the parent group ids of its member groups so
+	// they do not keep pointing at a group that no longer exists
+	memberGroups, err := i.MemDBGroupsByParentGroupIDInTxn(txn, group.ID, true)
+	if err != nil {
+		return nil, err
+	}
+	for _, memberGroup := range memberGroups {
+		memberGroup.ParentGroupIDs = strutil.StrListDelete(memberGroup.ParentGroupIDs, group.ID)
+		err = i.UpsertGroupInTxn(ctx, txn, memberGroup, true)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Delete the group using the same transaction
 	err = i.MemDBDeleteGroupByIDInTxn(txn, group.ID)
 	if err != nil {

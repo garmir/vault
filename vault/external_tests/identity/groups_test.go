@@ -7,8 +7,10 @@ import (
 	"testing"
 
 	"github.com/hashicorp/vault/api"
+	"github.com/hashicorp/vault/helper/testhelpers"
 	"github.com/hashicorp/vault/helper/testhelpers/minimal"
 	"github.com/hashicorp/vault/sdk/helper/docker"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIdentityStore_ListGroupAlias(t *testing.T) {
@@ -354,4 +356,54 @@ func TestIdentityStore_ExternalGroupMembershipsAcrossMounts(t *testing.T) {
 	if !found {
 		t.Fatalf("missing entity ID %q first external group with ID %q", entityID, ldapExtGroupID2)
 	}
+}
+
+// TestIdentityStore_GroupDeleteClearsParentGroupIDs checks that deleting a
+// group also removes its id from the parent_group_ids of its member groups,
+// in memory and in storage, so a child is not left pointing at a group that
+// no longer exists.
+func TestIdentityStore_GroupDeleteClearsParentGroupIDs(t *testing.T) {
+	t.Parallel()
+	cluster := minimal.NewTestSoloCluster(t, nil)
+	client := cluster.Cores[0].Client
+
+	createGroup := func(name string, memberGroupIDs ...string) string {
+		data := map[string]interface{}{"name": name}
+		if len(memberGroupIDs) > 0 {
+			data["member_group_ids"] = memberGroupIDs
+		}
+		secret, err := client.Logical().Write("identity/group", data)
+		require.NoError(t, err)
+		require.NotNil(t, secret)
+		return secret.Data["id"].(string)
+	}
+
+	childGroupID := createGroup("child")
+	parentGroupID := createGroup("parent", childGroupID)
+	otherParentGroupID := createGroup("other-parent", childGroupID)
+
+	readParentGroupIDs := func() []interface{} {
+		secret, err := client.Logical().Read("identity/group/id/" + childGroupID)
+		require.NoError(t, err)
+		require.NotNil(t, secret)
+		ids, _ := secret.Data["parent_group_ids"].([]interface{})
+		return ids
+	}
+	require.ElementsMatch(t, []interface{}{parentGroupID, otherParentGroupID}, readParentGroupIDs())
+
+	// delete one parent by name and check that only its id is removed
+	_, err := client.Logical().Delete("identity/group/name/parent")
+	require.NoError(t, err)
+	require.Equal(t, []interface{}{otherParentGroupID}, readParentGroupIDs())
+
+	// delete the other parent by id and check that nothing is left
+	_, err = client.Logical().Delete("identity/group/id/" + otherParentGroupID)
+	require.NoError(t, err)
+	require.Empty(t, readParentGroupIDs(), "deleted parents are still listed on the child")
+
+	// the cleanup has to reach storage as well, so reload the identity store
+	// from storage by sealing and unsealing before reading the child again
+	testhelpers.EnsureCoresSealed(t, cluster)
+	testhelpers.EnsureCoresUnsealed(t, cluster)
+	require.Empty(t, readParentGroupIDs(), "deleted parents are still persisted on the child")
 }
