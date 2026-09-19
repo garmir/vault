@@ -251,11 +251,15 @@ jobs:
             # revgrep keeps only findings on lines this branch changed
             (cd "$m" && (staticcheck -tags testonly "$p" || true) | revgrep "$base")
           done
-      - name: misspell changed files
+      - name: misspell changed files, new findings only
         shell: bash
         run: |
           set -euo pipefail
-          echo '${{ needs.changes.outputs.go-files }}' | jq -r '.[]' | xargs -r misspell -error
+          base=$(git merge-base "upstream/${{ inputs.base }}" HEAD)
+          # upstream only runs misspell over the website sources, so pre-existing
+          # typos in go files are not our concern; revgrep keeps only findings on
+          # lines this branch changed
+          echo '${{ needs.changes.outputs.go-files }}' | jq -r '.[]' | xargs -r misspell | revgrep "$base"
 
   test:
     name: test changed packages
