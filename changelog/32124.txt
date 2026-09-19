@@ -1,0 +1,3 @@
+```release-note:bug
+sdk/ldaputil: fix malformed error messages that contained a literal `{{err}}` and a `%!(EXTRA ...)` marker, and wrap the underlying error so it can be inspected with errors.Is and errors.As.
+```
