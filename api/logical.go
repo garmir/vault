@@ -378,11 +378,11 @@ func (c *Logical) write(ctx context.Context, path string, request *Request) (*Se
 }
 
 func (c *Logical) writeRaw(ctx context.Context, request *Request) (*Response, error) {
-	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
-	defer cancelFunc()
-
-	resp, err := c.c.rawRequestWithContext(ctx, request)
-	return resp, err
+	// the caller reads the body after this returns, so the timeout context
+	// must stay alive until then. RawRequestWithContext installs the timeout
+	// without cancelling on return, the same way the raw read and delete
+	// paths do.
+	return c.c.RawRequestWithContext(ctx, request)
 }
 
 func (c *Logical) Delete(path string) (*Secret, error) {
