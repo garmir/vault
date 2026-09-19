@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	hclog "github.com/hashicorp/go-hclog"
@@ -53,17 +54,13 @@ func NewFileSink(conf *sink.SinkConfig) (sink.Sink, error) {
 
 	if modeRaw, ok := conf.Config["mode"]; ok {
 		f.logger.Debug("verifying override for default file sink mode")
-		mode, typeOK := modeRaw.(int)
-		if !typeOK {
-			return nil, errors.New("could not parse 'mode' as integer")
-		}
-
-		if !os.FileMode(mode).IsRegular() {
-			return nil, fmt.Errorf("file mode does not represent a regular file")
+		mode, err := parseFileMode(modeRaw)
+		if err != nil {
+			return nil, err
 		}
 
 		f.logger.Debug("overriding default file sink", "mode", mode)
-		f.mode = os.FileMode(mode)
+		f.mode = mode
 	}
 
 	if modeRaw, ok := conf.Config["owner"]; ok {
@@ -157,4 +154,36 @@ func (f *fileSink) WriteToken(token string) error {
 
 	f.logger.Info("token written", "path", f.path)
 	return nil
+}
+
+// parseFileMode reads the mode option. a number is used as is, so in hcl it
+// has to be an octal literal such as 0640; a string of octal digits such as
+// "0640" is accepted too, since json has no octal literals. a number with
+// bits above the permission bits is rejected because it is almost always
+// a decimal value written where an octal one was meant, for example 640.
+// smaller decimals such as 400 cannot be told apart from an intended octal
+// value, so the string form is the reliable way to write the mode in json.
+func parseFileMode(raw interface{}) (os.FileMode, error) {
+	var mode uint64
+	switch v := raw.(type) {
+	case int:
+		if v < 0 {
+			return 0, fmt.Errorf("file mode %d must not be negative", v)
+		}
+		mode = uint64(v)
+	case string:
+		parsed, err := strconv.ParseUint(v, 8, 32)
+		if err != nil {
+			return 0, fmt.Errorf("could not parse 'mode' %q as an octal file mode", v)
+		}
+		mode = parsed
+	default:
+		return 0, errors.New("could not parse 'mode' as an integer or a string")
+	}
+
+	if mode&^0o777 != 0 {
+		return 0, fmt.Errorf("file mode %v has bits above the permission bits; write it as an octal literal such as 0640, or as the string \"0640\"", raw)
+	}
+
+	return os.FileMode(mode), nil
 }
