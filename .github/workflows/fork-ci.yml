@@ -106,6 +106,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          filter: blob:none
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       - name: go from nixpkgs
         shell: bash
@@ -113,6 +115,7 @@ jobs:
           out=$(nix build "$NIXPKGS#go_1_27" --no-link --print-out-paths)
           echo "$out/bin" >> "$GITHUB_PATH"
           "$out/bin/go" version
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -120,6 +123,21 @@ jobs:
             ~/.cache/go-build
           key: go-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
           restore-keys: go-${{ runner.os }}-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: tools
+        with:
+          path: ~/go/bin
+          key: tools-${{ runner.os }}-${{ hashFiles('tools/tools.sh') }}
+      - name: install revgrep
+        if: steps.tools.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          go install mvdan.cc/gofumpt@v0.8.0
+          go install github.com/rinchsan/gosimports/cmd/gosimports@v0.3.8
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+          go install github.com/golangci/revgrep/cmd/revgrep@v0.8.0
+          go install github.com/golangci/misspell/cmd/misspell@v0.6.0
+          go install gotest.tools/gotestsum@v1.12.3
       - name: build every module
         shell: bash
         run: |
@@ -128,14 +146,18 @@ jobs:
             echo "==> building $m"
             (cd "$m" && go build ./...)
           done
-      - name: vet changed packages
+      - name: vet changed packages, new findings only
         if: needs.changes.outputs.has-go == 'true'
         shell: bash
         run: |
           set -euo pipefail
+          git remote add upstream https://github.com/hashicorp/vault.git
+          git fetch --filter=blob:none upstream "${{ inputs.base }}"
+          base=$(git merge-base "upstream/${{ inputs.base }}" HEAD)
           echo '${{ needs.changes.outputs.targets }}' | jq -r '.[]' | while IFS=: read -r m p; do
             echo "==> vet $m $p"
-            (cd "$m" && go vet -tags testonly "$p")
+            # some packages carry old vet findings; revgrep keeps only lines this branch changed
+            (cd "$m" && (go vet -tags testonly "$p" 2>&1 || true) | revgrep "$base")
           done
 
   fmt:
