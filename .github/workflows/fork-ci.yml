@@ -1,0 +1,302 @@
+# fork-only ci for garmir/vault
+#
+# upstream's workflows pick self-hosted runners on forks, so they never run here.
+# this workflow lives on the fork default branch and is dispatched against a fix
+# branch, keeping fix branches identical to what goes upstream.
+#
+#   gh workflow run fork-ci.yml --ref main -f ref=fix/12345-short-slug
+#
+# go comes from a pinned nixpkgs so local and ci builds use the same toolchain.
+
+name: fork ci
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: branch or sha to test
+        required: true
+        type: string
+      base:
+        description: upstream ref the change is based on
+        required: false
+        default: main
+        type: string
+      packages:
+        description: extra package patterns to test, space separated, prefixed with the module dir (for example "api:./... sdk:./helper/ldaputil/...")
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: fork-ci-${{ inputs.ref }}
+  cancel-in-progress: true
+
+env:
+  NIXPKGS: github:NixOS/nixpkgs/20b1ddd1aa5ace70c9468305030aa4f9ef79671b
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=mod
+  # keep vault's own test env clean, mirrors the makefile "test" target
+  VAULT_ADDR: ""
+  VAULT_TOKEN: ""
+  VAULT_DEV_ROOT_TOKEN_ID: ""
+  VAULT_ACC: ""
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: changed files
+    runs-on: ubuntu-latest
+    outputs:
+      go-files: ${{ steps.diff.outputs.go-files }}
+      modules: ${{ steps.diff.outputs.modules }}
+      targets: ${{ steps.diff.outputs.targets }}
+      has-go: ${{ steps.diff.outputs.has-go }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          filter: blob:none
+      - id: diff
+        env:
+          EXTRA_TARGETS: ${{ inputs.packages }}
+        name: compute changed go files, modules and package targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/hashicorp/vault.git
+          git fetch --filter=blob:none upstream "${{ inputs.base }}"
+          base=$(git merge-base "upstream/${{ inputs.base }}" HEAD)
+          echo "merge base: $base"
+
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$base" HEAD -- '*.go' | grep -v '\.pb\.go$' | grep -v '^vendor/' || true)
+          printf 'changed go files:\n'; printf '  %s\n' "${files[@]:-none}"
+
+          # map each file to its go module (nearest go.mod walking up) and package dir
+          declare -A mods targets
+          for f in "${files[@]}"; do
+            dir=$(dirname "$f")
+            m="$dir"
+            while [ "$m" != "." ] && [ ! -f "$m/go.mod" ]; do m=$(dirname "$m"); done
+            mods["$m"]=1
+            rel=${dir#"$m"}; rel=${rel#/}
+            [ -z "$rel" ] && rel="."
+            targets["$m:./$rel"]=1
+          done
+          # extra targets requested by hand: "module:./pattern"
+          for t in $EXTRA_TARGETS; do
+            [ -n "$t" ] && targets["$t"]=1
+          done
+
+          {
+            echo "go-files=$(printf '%s\n' "${files[@]}" | jq -R . | jq -sc .)"
+            echo "modules=$(printf '%s\n' "${!mods[@]}" | grep . | jq -R . | jq -sc .)"
+            echo "targets=$(printf '%s\n' "${!targets[@]}" | grep . | jq -R . | jq -sc .)"
+            if [ "${#files[@]}" -gt 0 ]; then echo "has-go=true"; else echo "has-go=false"; fi
+          } | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    name: build and vet
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: go from nixpkgs
+        shell: bash
+        run: |
+          out=$(nix build "$NIXPKGS#go_1_27" --no-link --print-out-paths)
+          echo "$out/bin" >> "$GITHUB_PATH"
+          "$out/bin/go" version
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: go-${{ runner.os }}-
+      - name: build every module
+        shell: bash
+        run: |
+          set -euo pipefail
+          for m in . api sdk $(echo '${{ needs.changes.outputs.modules }}' | jq -r '.[]'); do
+            echo "==> building $m"
+            (cd "$m" && go build ./...)
+          done
+      - name: vet changed packages
+        if: needs.changes.outputs.has-go == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '${{ needs.changes.outputs.targets }}' | jq -r '.[]' | while IFS=: read -r m p; do
+            echo "==> vet $m $p"
+            (cd "$m" && go vet -tags testonly "$p")
+          done
+
+  fmt:
+    name: gofumpt and gosimports
+    needs: changes
+    if: needs.changes.outputs.has-go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: go from nixpkgs
+        shell: bash
+        run: |
+          out=$(nix build "$NIXPKGS#go_1_27" --no-link --print-out-paths)
+          echo "$out/bin" >> "$GITHUB_PATH"
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: tools
+        with:
+          path: ~/go/bin
+          key: tools-${{ runner.os }}-${{ hashFiles('tools/tools.sh') }}
+      - name: install formatting tools
+        if: steps.tools.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          # versions match tools/tools.sh
+          go install mvdan.cc/gofumpt@v0.8.0
+          go install github.com/rinchsan/gosimports/cmd/gosimports@v0.3.8
+          go install honnef.co/go/tools/cmd/staticcheck@v0.6.0
+          go install github.com/golangci/misspell/cmd/misspell@v0.6.0
+          go install gotest.tools/gotestsum@v1.12.3
+      - name: check formatting of changed files
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=$(echo '${{ needs.changes.outputs.go-files }}' | jq -r '.[]' | tr '\n' ' ')
+          ./scripts/go-helper.sh check-fmt $files
+
+  lint:
+    name: staticcheck and misspell
+    needs: changes
+    if: needs.changes.outputs.has-go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: go from nixpkgs
+        shell: bash
+        run: |
+          out=$(nix build "$NIXPKGS#go_1_27" --no-link --print-out-paths)
+          echo "$out/bin" >> "$GITHUB_PATH"
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: go-${{ runner.os }}-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: tools
+        with:
+          path: ~/go/bin
+          key: tools-${{ runner.os }}-${{ hashFiles('tools/tools.sh') }}
+      - name: install lint tools
+        if: steps.tools.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          go install mvdan.cc/gofumpt@v0.8.0
+          go install github.com/rinchsan/gosimports/cmd/gosimports@v0.3.8
+          go install honnef.co/go/tools/cmd/staticcheck@v0.6.0
+          go install github.com/golangci/misspell/cmd/misspell@v0.6.0
+          go install gotest.tools/gotestsum@v1.12.3
+      - name: staticcheck changed packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '${{ needs.changes.outputs.targets }}' | jq -r '.[]' | while IFS=: read -r m p; do
+            echo "==> staticcheck $m $p"
+            (cd "$m" && staticcheck -tags testonly "$p")
+          done
+      - name: misspell changed files
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '${{ needs.changes.outputs.go-files }}' | jq -r '.[]' | xargs -r misspell -error
+
+  test:
+    name: test changed packages
+    needs: changes
+    if: needs.changes.outputs.has-go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: go from nixpkgs
+        shell: bash
+        run: |
+          out=$(nix build "$NIXPKGS#go_1_27" --no-link --print-out-paths)
+          echo "$out/bin" >> "$GITHUB_PATH"
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: go-${{ runner.os }}-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: tools
+        with:
+          path: ~/go/bin
+          key: tools-${{ runner.os }}-${{ hashFiles('tools/tools.sh') }}
+      - name: install gotestsum
+        if: steps.tools.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          go install mvdan.cc/gofumpt@v0.8.0
+          go install github.com/rinchsan/gosimports/cmd/gosimports@v0.3.8
+          go install honnef.co/go/tools/cmd/staticcheck@v0.6.0
+          go install github.com/golangci/misspell/cmd/misspell@v0.6.0
+          go install gotest.tools/gotestsum@v1.12.3
+      - name: run tests with the race detector
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '${{ needs.changes.outputs.targets }}' | jq -r '.[]' | while IFS=: read -r m p; do
+            echo "==> test $m $p"
+            (cd "$m" && gotestsum --format testname -- -race -tags testonly -timeout 30m -parallel 20 -count 1 "$p")
+          done
+
+  changelog:
+    name: changelog entry
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          filter: blob:none
+      - name: look for a changelog file
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/hashicorp/vault.git
+          git fetch --filter=blob:none upstream "${{ inputs.base }}"
+          base=$(git merge-base "upstream/${{ inputs.base }}" HEAD)
+          added=$(git diff --name-only --diff-filter=A "$base" HEAD -- 'changelog/*.txt' || true)
+          if [ -z "$added" ]; then
+            echo "::warning::no changelog/<pr>.txt added yet; upstream requires one before merge"
+            exit 0
+          fi
+          for f in $added; do
+            echo "==> $f"; cat "$f"
+            grep -q '^```release-note:' "$f" || { echo "::error::$f is missing a release-note fence"; exit 1; }
+          done
