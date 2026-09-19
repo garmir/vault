@@ -223,7 +223,7 @@ GROUP:
 		// Try looking up the user by name
 		g, err := osuser.LookupGroup(group)
 		if err != nil {
-			return fmt.Errorf("failed to look up group %q: %v", user, err)
+			return fmt.Errorf("failed to look up group %q: %v", group, err)
 		}
 		gid, _ = strconv.Atoi(g.Gid)
 	}
