@@ -86,6 +86,24 @@ jobs:
             [ -z "$rel" ] && rel="."
             targets["$m:./$rel"]=1
           done
+          # packages that import a changed package are tested too; a change in
+          # pki/issuing once passed here and broke the pki package on main
+          for t in "${!targets[@]}"; do
+            m=${t%%:*}; rel=${t#*:./}
+            ip="github.com/hashicorp/vault"
+            [ "$m" != "." ] && ip="$ip/$m"
+            [ "$rel" != "." ] && ip="$ip/$rel"
+            while IFS= read -r imp; do
+              [ -z "$imp" ] && continue
+              dir=$(dirname "$imp")
+              im="$dir"
+              while [ "$im" != "." ] && [ ! -f "$im/go.mod" ]; do im=$(dirname "$im"); done
+              irel=${dir#"$im"}; irel=${irel#/}
+              [ -z "$irel" ] && irel="."
+              mods["$im"]=1
+              targets["$im:./$irel"]=1
+            done < <(grep -rl --include='*.go' --exclude-dir=vendor --exclude-dir=.git -F "\"$ip\"" . | sed 's|^\./||' | grep -v "^$([ "$m" = . ] && echo "" || echo "$m/")$rel/[^/]*\.go$" || true)
+          done
           # extra targets requested by hand: "module:./pattern"
           for t in $EXTRA_TARGETS; do
             [ -n "$t" ] && targets["$t"]=1
