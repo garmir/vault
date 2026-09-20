@@ -3045,6 +3045,7 @@ func (b *backend) handleRoleSecretIDCommon(ctx context.Context, req *logical.Req
 		return logical.ErrorResponse(fmt.Sprintf("failed to parse metadata: %v", err)), nil
 	}
 
+	requestedTTL := secretIDStorage.SecretIDTTL
 	if secretIDStorage, err = b.registerSecretIDEntry(ctx, req.Storage, role.name, secretID, role.HMACKey, role.SecretIDPrefix, secretIDStorage); err != nil {
 		return nil, fmt.Errorf("failed to store secret_id: %w", err)
 	}
@@ -3053,9 +3054,12 @@ func (b *backend) handleRoleSecretIDCommon(ctx context.Context, req *logical.Req
 		Data: map[string]interface{}{
 			"secret_id":          secretID,
 			"secret_id_accessor": secretIDStorage.SecretIDAccessor,
-			"secret_id_ttl":      int64(b.deriveSecretIDTTL(secretIDStorage.SecretIDTTL).Seconds()),
+			"secret_id_ttl":      int64(secretIDStorage.SecretIDTTL.Seconds()),
 			"secret_id_num_uses": secretIDStorage.SecretIDNumUses,
 		},
+	}
+	if secretIDStorage.SecretIDTTL < requestedTTL {
+		resp.AddWarning(fmt.Sprintf("ttl of %q exceeds the mount's max_lease_ttl of %q and was capped", requestedTTL.String(), b.System().MaxLeaseTTL().String()))
 	}
 
 	return resp, nil

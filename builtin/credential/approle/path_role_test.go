@@ -19,6 +19,7 @@ import (
 	"github.com/hashicorp/vault/sdk/helper/tokenutil"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/mitchellh/mapstructure"
+	"github.com/stretchr/testify/require"
 )
 
 func (b *backend) requestNoErr(t *testing.T, req *logical.Request) *logical.Response {
@@ -2178,4 +2179,54 @@ func TestAppRole_RoleSecretIDAccessorCrossDelete(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error")
 	}
+}
+
+// TestAppRole_SecretIDTTLCappedConsistently checks that a secret id ttl above
+// the mount's max lease ttl is reported the same way everywhere: the create
+// response, the accessor lookup and the expiration time all use the capped
+// value, and the create response says that the cap was applied.
+func TestAppRole_SecretIDTTLCappedConsistently(t *testing.T) {
+	b, storage := createBackendWithStorage(t)
+	createRole(t, b, storage, "role1", "a,b")
+
+	maxTTL := b.System().MaxLeaseTTL()
+	requested := maxTTL + time.Hour
+
+	// the role's own secret_id_ttl bounds what a request may ask for
+	b.requestNoErr(t, &logical.Request{
+		Operation: logical.UpdateOperation,
+		Storage:   storage,
+		Path:      "role/role1",
+		Data: map[string]interface{}{
+			"secret_id_ttl": requested.String(),
+		},
+	})
+
+	resp := b.requestNoErr(t, &logical.Request{
+		Operation: logical.UpdateOperation,
+		Storage:   storage,
+		Path:      "role/role1/secret-id",
+		Data: map[string]interface{}{
+			"ttl": requested.String(),
+		},
+	})
+	require.Equal(t, int64(maxTTL.Seconds()), resp.Data["secret_id_ttl"])
+	accessor := resp.Data["secret_id_accessor"].(string)
+	createWarnings := resp.Warnings
+
+	resp = b.requestNoErr(t, &logical.Request{
+		Operation: logical.UpdateOperation,
+		Storage:   storage,
+		Path:      "role/role1/secret-id-accessor/lookup",
+		Data: map[string]interface{}{
+			"secret_id_accessor": accessor,
+		},
+	})
+	require.Equal(t, maxTTL/time.Second, resp.Data["secret_id_ttl"])
+	creation := resp.Data["creation_time"].(time.Time)
+	expiration := resp.Data["expiration_time"].(time.Time)
+	require.Equal(t, maxTTL, expiration.Sub(creation))
+
+	require.Len(t, createWarnings, 1, "expected a warning about the capped ttl")
+	require.Contains(t, createWarnings[0], "max_lease_ttl")
 }

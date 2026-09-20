@@ -296,8 +296,11 @@ func (b *backend) registerSecretIDEntry(ctx context.Context, s logical.Storage, 
 	secretEntry.CreationTime = currentTime
 	secretEntry.LastUpdatedTime = currentTime
 
-	if ttl := b.deriveSecretIDTTL(secretEntry.SecretIDTTL); ttl != time.Duration(0) {
-		secretEntry.ExpirationTime = currentTime.Add(ttl)
+	// store the ttl that actually applies, so lookups report the same value
+	// the expiration time was computed from
+	secretEntry.SecretIDTTL = b.deriveSecretIDTTL(secretEntry.SecretIDTTL)
+	if secretEntry.SecretIDTTL != time.Duration(0) {
+		secretEntry.ExpirationTime = currentTime.Add(secretEntry.SecretIDTTL)
 	}
 
 	// Before storing the SecretID, store its accessor.
