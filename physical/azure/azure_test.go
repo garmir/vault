@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-storage-blob-go/azblob"
+	"github.com/Azure/go-autorest/autorest/adal"
 	log "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/vault/helper/testhelpers/azurite"
 	"github.com/hashicorp/vault/sdk/helper/logging"
@@ -240,6 +241,58 @@ func TestAzureBackend_validateAccountName(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
+		})
+	}
+}
+
+// TestAzureBackend_tokenRefreshInterval checks how the refresh interval for an
+// msi token is derived. imds returns expires_in in some environments and only
+// expires_on in others, such as azure container apps, so both have to work.
+func TestAzureBackend_tokenRefreshInterval(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+
+	tests := []struct {
+		name    string
+		token   adal.Token
+		want    time.Duration
+		wantErr bool
+	}{
+		{
+			name:  "expires_in",
+			token: adal.Token{ExpiresIn: "1000"},
+			want:  900 * time.Second,
+		},
+		{
+			name:  "expires_on only",
+			token: adal.Token{ExpiresOn: "1700001000"},
+			want:  900 * time.Second,
+		},
+		{
+			name:  "expires_in wins when both are set",
+			token: adal.Token{ExpiresIn: "1000", ExpiresOn: "1700002000"},
+			want:  900 * time.Second,
+		},
+		{
+			name:    "expires_on in the past",
+			token:   adal.Token{ExpiresOn: "1699999000"},
+			wantErr: true,
+		},
+		{
+			name:    "neither",
+			token:   adal.Token{},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tokenRefreshInterval(tc.token, now)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
 		})
 	}
 }

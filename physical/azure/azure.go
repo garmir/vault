@@ -136,17 +136,16 @@ func NewAzureBackend(conf map[string]string, logger log.Logger) (physical.Backen
 				return 0
 			}
 
-			expIn, err := authToken.Token().ExpiresIn.Int64()
+			interval, err := tokenRefreshInterval(authToken.Token(), time.Now())
 			if err != nil {
-				logger.Error("couldn't retrieve jwt claim for 'expiresIn' from refreshed token", "error", err)
+				logger.Error("couldn't determine the lifetime of the refreshed token", "error", err)
 				return 0
 			}
 
-			logger.Debug("token refreshed, new token expires in", "access_token_expiry", expIn)
+			logger.Debug("token refreshed, next refresh in", "refresh_in", interval)
 			c.SetToken(authToken.OAuthToken())
 
-			// tokens are valid for 23h59m (86399s) by default, refresh after ~21h
-			return time.Duration(int(float64(expIn)*0.9)) * time.Second
+			return interval
 		})
 	} else {
 		credential, err = azblob.NewSharedKeyCredential(accountName, accountKey)
@@ -373,4 +372,25 @@ func getAuthTokenFromIMDS(resource string) (*adal.ServicePrincipalToken, error) 
 	}
 
 	return spt, nil
+}
+
+// tokenRefreshInterval returns how long to wait before refreshing an msi
+// token, which is 90% of the token's remaining lifetime. tokens are valid
+// for 23h59m by default, so that is about 21h. imds reports the lifetime as
+// expires_in in most environments but only as expires_on, an absolute unix
+// time, in others such as azure container apps.
+func tokenRefreshInterval(token adal.Token, now time.Time) (time.Duration, error) {
+	remaining, err := token.ExpiresIn.Int64()
+	if err != nil {
+		expiresOn, onErr := token.ExpiresOn.Int64()
+		if onErr != nil {
+			return 0, fmt.Errorf("token has neither a usable expires_in (%v) nor expires_on (%v)", err, onErr)
+		}
+		remaining = expiresOn - now.Unix()
+	}
+	if remaining <= 0 {
+		return 0, fmt.Errorf("refreshed token has already expired (%ds remaining)", remaining)
+	}
+
+	return time.Duration(float64(remaining)*0.9) * time.Second, nil
 }
