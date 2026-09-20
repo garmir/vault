@@ -944,3 +944,76 @@ func base64MissingAuthField() string {
 	min := `{"Authorization":["AWS4-HMAC-SHA256 Credential=AKIAJPQ466AIIQW4LPSQ/20180907/us-east-1/sts/aws4_request, SignedHeaders=content-length;content-type;host;x-amz-date;x-vault-aws-iam-server-id"],"Content-Length":["43"],"Content-Type":["application/x-www-form-urlencoded; charset=utf-8"],"User-Agent":["aws-sdk-go/1.14.24 (go1.11; darwin; amd64)"],"X-Amz-Date":["20180907T222145Z"],"X-Vault-Aws-Iam-Server-Id":["VaultAcceptanceTesting"]}`
 	return min
 }
+
+// TestBackend_pathLogin_buildHttpRequest checks that the configured sts
+// endpoint and the client's request uri are joined with exactly one slash,
+// whether or not the endpoint was written with a trailing slash.
+func TestBackend_pathLogin_buildHttpRequest(t *testing.T) {
+	tests := []struct {
+		name     string
+		method   string
+		endpoint string
+		rawURL   string
+		wantURL  string
+	}{
+		{
+			name:     "default endpoint, get with query",
+			method:   http.MethodGet,
+			endpoint: "https://sts.amazonaws.com",
+			rawURL:   "https://sts.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15",
+			wantURL:  "https://sts.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15",
+		},
+		{
+			name:     "default endpoint, post",
+			method:   http.MethodPost,
+			endpoint: "https://sts.amazonaws.com",
+			rawURL:   "https://sts.amazonaws.com/",
+			wantURL:  "https://sts.amazonaws.com/",
+		},
+		{
+			name:     "endpoint with trailing slash",
+			method:   http.MethodPost,
+			endpoint: "http://1.2.3.4:8888/",
+			rawURL:   "http://1.2.3.4:8888/",
+			wantURL:  "http://1.2.3.4:8888/",
+		},
+		{
+			name:     "endpoint with two trailing slashes",
+			method:   http.MethodPost,
+			endpoint: "http://1.2.3.4:8888//",
+			rawURL:   "http://1.2.3.4:8888/",
+			wantURL:  "http://1.2.3.4:8888/",
+		},
+		{
+			name:     "endpoint with a path prefix",
+			method:   http.MethodGet,
+			endpoint: "https://proxy.example.com/sts/",
+			rawURL:   "https://sts.amazonaws.com/?Action=GetCallerIdentity",
+			wantURL:  "https://proxy.example.com/sts/?Action=GetCallerIdentity",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			parsedURL, err := url.Parse(tc.rawURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req := buildHttpRequest(tc.method, tc.endpoint, parsedURL, "", http.Header{"X-Test": []string{"1"}})
+			if req == nil {
+				t.Fatal("expected a request")
+			}
+			if got := req.URL.String(); got != tc.wantURL {
+				t.Fatalf("url: expected %q, got %q", tc.wantURL, got)
+			}
+			// the host the client signed has to survive the endpoint override
+			if req.Host != parsedURL.Host {
+				t.Fatalf("host: expected %q, got %q", parsedURL.Host, req.Host)
+			}
+			if req.Header.Get("X-Test") != "1" {
+				t.Fatal("headers were not copied")
+			}
+		})
+	}
+}

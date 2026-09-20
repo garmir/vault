@@ -1739,7 +1739,10 @@ func buildHttpRequest(method, endpoint string, parsedUrl *url.URL, body string, 
 	// URL because the GetCallerIdentity Action can be encoded in either the body
 	// or the URL. So, we need to rebuild the URL sent to the http library to have the
 	// custom, Vault-specified endpoint with the client-side request parameters.
-	targetUrl := fmt.Sprintf("%s/%s", endpoint, parsedUrl.RequestURI())
+	// the request uri always starts with a slash, so drop trailing ones from
+	// the endpoint instead of adding another; a path prefix on the endpoint
+	// is kept as is
+	targetUrl := strings.TrimRight(endpoint, "/") + parsedUrl.RequestURI()
 	request, err := http.NewRequest(method, targetUrl, strings.NewReader(body))
 	if err != nil {
 		return nil
